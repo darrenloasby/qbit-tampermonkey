@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         qBittorrent Torrent Interceptor
 // @namespace    https://github.com/joshkerr/qbit-tampermonkey
-// @version      1.15.0
+// @version      1.16.0
 // @updateURL    https://raw.githubusercontent.com/darrenloasby/qbit-tampermonkey/main/qbittorrent-interceptor.user.js
 // @downloadURL  https://raw.githubusercontent.com/darrenloasby/qbit-tampermonkey/main/qbittorrent-interceptor.user.js
 // @description  Intercept torrent downloads and magnet links, send them to qBittorrent or download locally
@@ -108,6 +108,9 @@
         .qbit-modal input[type="password"] {
             width: 100%;
             padding: 10px 12px;
+            background-color: #fff;
+            color: #111;
+            color-scheme: light;
             border: 1px solid #ccc;
             border-radius: 6px;
             font-size: 14px;
@@ -119,6 +122,7 @@
             background: #2d2d2d;
             border-color: #444;
             color: #fff;
+            color-scheme: dark;
         }
         .qbit-modal-buttons {
             display: flex;
