@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         qBittorrent Torrent Interceptor
 // @namespace    https://github.com/joshkerr/qbit-tampermonkey
-// @version      1.14.0
+// @version      1.15.0
 // @updateURL    https://raw.githubusercontent.com/darrenloasby/qbit-tampermonkey/main/qbittorrent-interceptor.user.js
 // @downloadURL  https://raw.githubusercontent.com/darrenloasby/qbit-tampermonkey/main/qbittorrent-interceptor.user.js
 // @description  Intercept torrent downloads and magnet links, send them to qBittorrent or download locally
@@ -11742,9 +11742,15 @@ zabc.net
                 { 'Content-Type': 'application/x-www-form-urlencoded' }
             );
 
-            if (response.status === 200 && response.responseText === 'Ok.') {
+            const addResult = parseTorrentAddResponse(response);
+            if (addResult === 'added') {
                 const displayName = torrentName || (url.startsWith('magnet:') ? 'Magnet link' : 'Torrent');
                 showToast(`Added: ${displayName}`, 'success');
+                return true;
+            } else if (addResult === 'pending') {
+                const displayName = torrentName || (url.startsWith('magnet:') ? 'Magnet link' : 'Torrent');
+                showToast(`qBittorrent accepted ${displayName}; fetching metadata...`, 'info');
+                debugLog('qBittorrent accepted URL add while metadata fetch is pending');
                 return true;
             } else if (response.status === 415) {
                 showToast('qBittorrent: Torrent file is not valid', 'error');
@@ -11844,8 +11850,13 @@ zabc.net
                 boundary
             );
 
-            if (response.status === 200 && response.responseText === 'Ok.') {
+            const addResult = parseTorrentAddResponse(response);
+            if (addResult === 'added') {
                 showToast(`Added: ${fileName}`, 'success');
+                return true;
+            } else if (addResult === 'pending') {
+                showToast(`qBittorrent accepted ${fileName}; processing...`, 'info');
+                debugLog('qBittorrent accepted file add while processing is pending');
                 return true;
             } else if (response.status === 403 && retryCount < 1) {
                 // Session might have expired or CSRF issue - force re-login and retry
@@ -11863,6 +11874,26 @@ zabc.net
             console.error('Upload torrent error:', error);
             return false;
         }
+    }
+
+    // qBittorrent before Web API 2.14 returns "Ok." on success. Newer
+    // versions return JSON counts and use HTTP 202 while URL metadata is
+    // being fetched asynchronously.
+    function parseTorrentAddResponse(response) {
+        if (response.status === 200 && response.responseText === 'Ok.') return 'added';
+
+        let result;
+        try {
+            result = JSON.parse(response.responseText);
+        } catch (e) {
+            return 'unknown';
+        }
+
+        if (response.status === 200 || response.status === 202) {
+            if (Number(result.success_count) > 0) return 'added';
+            if (Number(result.pending_count) > 0) return 'pending';
+        }
+        return 'unknown';
     }
 
     // Binary-aware request function for file uploads
