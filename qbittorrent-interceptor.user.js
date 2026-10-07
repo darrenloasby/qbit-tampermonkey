@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         qBittorrent Torrent Interceptor
 // @namespace    https://github.com/joshkerr/qbit-tampermonkey
-// @version      1.13.0
+// @version      1.14.0
 // @updateURL    https://raw.githubusercontent.com/darrenloasby/qbit-tampermonkey/main/qbittorrent-interceptor.user.js
 // @downloadURL  https://raw.githubusercontent.com/darrenloasby/qbit-tampermonkey/main/qbittorrent-interceptor.user.js
 // @description  Intercept torrent downloads and magnet links, send them to qBittorrent or download locally
@@ -11947,31 +11947,54 @@ zabc.net
     // ============================================
 
     function downloadTorrentFile(url) {
-        return new Promise((resolve, reject) => {
-            GM_xmlhttpRequest({
-                method: 'GET',
-                url: url,
-                responseType: 'blob',
-                // This will include cookies from the current site session
-                // which handles authenticated downloads
-                withCredentials: true,
-                anonymous: false,
-                timeout: REQUEST_TIMEOUT_MS,
-                onload: function(response) {
-                    if (response.status === 200) {
-                        resolve(response.response);
+        return (async () => {
+            // Fetch same-origin tracker downloads in the page's own browser
+            // context so its authenticated session (including HttpOnly
+            // cookies) is applied exactly as it is for a normal page request.
+            // GM_xmlhttpRequest remains the fallback for cross-origin links,
+            // where page fetch would be blocked by CORS.
+            try {
+                const torrentUrl = new URL(url, window.location.href);
+                if (torrentUrl.origin === window.location.origin) {
+                    const response = await fetch(torrentUrl.href, {
+                        credentials: 'include',
+                        cache: 'no-store'
+                    });
+                    if (response.ok) {
+                        const blob = await response.blob();
+                        if (await looksLikeTorrentFile(blob)) return blob;
+                        debugLog('Page-context tracker request returned a non-torrent response');
                     } else {
-                        reject(new Error(`HTTP ${response.status}`));
+                        debugLog('Page-context tracker request failed:', response.status);
                     }
-                },
-                onerror: function(error) {
-                    reject(error);
-                },
-                ontimeout: function() {
-                    reject(new Error(`Download timed out after ${REQUEST_TIMEOUT_MS}ms`));
                 }
+            } catch (error) {
+                debugLog('Page-context tracker request failed; trying Tampermonkey request:', error);
+            }
+
+            return new Promise((resolve, reject) => {
+                GM_xmlhttpRequest({
+                    method: 'GET',
+                    url: url,
+                    responseType: 'blob',
+                    anonymous: false,
+                    timeout: REQUEST_TIMEOUT_MS,
+                    onload: function(response) {
+                        if (response.status === 200) {
+                            resolve(response.response);
+                        } else {
+                            reject(new Error(`HTTP ${response.status}`));
+                        }
+                    },
+                    onerror: function(error) {
+                        reject(error);
+                    },
+                    ontimeout: function() {
+                        reject(new Error(`Download timed out after ${REQUEST_TIMEOUT_MS}ms`));
+                    }
+                });
             });
-        });
+        })();
     }
 
     // Bencoded torrent files always start with 'd' (a dictionary). Trackers
