@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         qBittorrent Torrent Interceptor
 // @namespace    https://github.com/joshkerr/qbit-tampermonkey
-// @version      1.16.0
+// @version      1.17.0
 // @updateURL    https://raw.githubusercontent.com/darrenloasby/qbit-tampermonkey/main/qbittorrent-interceptor.user.js
 // @downloadURL  https://raw.githubusercontent.com/darrenloasby/qbit-tampermonkey/main/qbittorrent-interceptor.user.js
 // @description  Intercept torrent downloads and magnet links, send them to qBittorrent or download locally
@@ -60,6 +60,7 @@
 
     // Session ID for qBittorrent authentication
     let qbitSessionId = null;
+    let lastClickSourceElement = null;
 
     // ============================================
     // STYLES
@@ -11724,8 +11725,12 @@ zabc.net
             // Allow this confirmation dialog to override the configured default.
             const category = typeof addOptions.category === 'string' ? addOptions.category.trim().replace(/[\r\n]/g, '') : CONFIG.category;
             const autoStart = typeof addOptions.autoStart === 'boolean' ? addOptions.autoStart : CONFIG.autoStart;
+            const tags = Array.isArray(addOptions.tags) ? addOptions.tags.filter((tag) => typeof tag === 'string' && tag.trim() && !tag.includes(',')).join(',') : '';
             if (category) {
                 formData.append('category', category);
+            }
+            if (tags) {
+                formData.append('tags', tags);
             }
 
             // Auto-start setting ('paused' for qBittorrent 4.x, 'stopped' for 5.x)
@@ -11820,8 +11825,12 @@ zabc.net
             // Allow this confirmation dialog to override the configured default.
             const category = typeof addOptions.category === 'string' ? addOptions.category.trim().replace(/[\r\n]/g, '') : CONFIG.category;
             const autoStart = typeof addOptions.autoStart === 'boolean' ? addOptions.autoStart : CONFIG.autoStart;
+            const tags = Array.isArray(addOptions.tags) ? addOptions.tags.filter((tag) => typeof tag === 'string' && tag.trim() && !tag.includes(',')).join(',') : '';
             if (category) {
                 parts.push(stringToBytes(`--${boundary}\r\nContent-Disposition: form-data; name="category"\r\n\r\n${category}\r\n`));
+            }
+            if (tags) {
+                parts.push(stringToBytes(`--${boundary}\r\nContent-Disposition: form-data; name="tags"\r\n\r\n${tags}\r\n`));
             }
 
             // Auto-start setting ('paused' for qBittorrent 4.x, 'stopped' for 5.x)
@@ -12156,7 +12165,59 @@ zabc.net
         return !!url && String(url).toLowerCase().startsWith('magnet:');
     }
 
-    function showTorrentConfirmation(url, torrentName, magnet) {
+    function parseFreeleechExpiryTimestamp(text) {
+        let durationMs = 0;
+        let foundUnit = false;
+        const shorthand = String(text || '').match(/\b(\d+)\s*h\s*:\s*(\d+)\s*m\b/i);
+        if (shorthand) {
+            durationMs = (Number(shorthand[1]) * 60 + Number(shorthand[2])) * 60 * 1000;
+            foundUnit = true;
+        } else {
+            const units = /\b(\d+)\s*(days?|hours?|minutes?|seconds?)\b/gi;
+            let match;
+            while ((match = units.exec(String(text || ''))) !== null) {
+                const value = Number(match[1]);
+                const unit = match[2].toLowerCase();
+                if (unit.startsWith('day')) durationMs += value * 24 * 60 * 60 * 1000;
+                else if (unit.startsWith('hour')) durationMs += value * 60 * 60 * 1000;
+                else if (unit.startsWith('minute')) durationMs += value * 60 * 1000;
+                else durationMs += value * 1000;
+                foundUnit = true;
+            }
+        }
+
+        return foundUnit && durationMs > 0
+            ? Math.floor((Date.now() + durationMs) / 1000)
+            : null;
+    }
+
+    function getGaytorFreeleechTag(sourceElement = null) {
+        const host = String(window.location.hostname || '').toLowerCase();
+        if (host !== 'gaytor.rent' && !host.endsWith('.gaytor.rent')) return '';
+
+        // Search pages put each torrent's countdown in its info cell. Scope
+        // lookup to the row containing the clicked download link so the tag
+        // cannot accidentally use another result's countdown.
+        const row = sourceElement?.closest?.('tr');
+        const infoCell = row?.querySelector('td.tocol2.biggerfont.infocol');
+        let expiry = null;
+        if (infoCell && /freeleech/i.test(infoCell.textContent || '')) {
+            const countdown = Array.from(infoCell.querySelectorAll('font'))
+                .map((font) => font.textContent || '')
+                .find((text) => /\b\d+\s*h\s*:\s*\d+\s*m\b|\b\d+\s*(?:days?|hours?|minutes?|seconds?)\b/i.test(text));
+            expiry = parseFreeleechExpiryTimestamp(countdown);
+        }
+
+        // Detail pages display the remaining time in a dedicated badge.
+        if (!expiry) {
+            const detailText = document.querySelector('span.dc-details-fl-badge small')?.textContent;
+            expiry = parseFreeleechExpiryTimestamp(detailText);
+        }
+
+        return expiry ? `freeleech-until-${expiry}` : '';
+    }
+
+    function showTorrentConfirmation(url, torrentName, magnet, freeleechTag = '') {
         const categoryInputId = `qbit-category-${Math.random().toString(36).slice(2)}`;
         const datalistId = `${categoryInputId}-options`;
         const defaultCategory = getDefaultTorrentCategory();
@@ -12170,7 +12231,7 @@ zabc.net
         const submit = async (autoStart, modal) => {
             if (!await signInFromGestureIfNeeded()) return;
             const category = modal.modal.querySelector('.qbit-category-input').value.trim();
-            const addOptions = { category, autoStart };
+            const addOptions = { category, autoStart, tags: freeleechTag ? [freeleechTag] : [] };
             if (magnet) await addTorrentByUrl(url, torrentName, 0, addOptions);
             else await handleTorrentDownload(url, torrentName + '.torrent', addOptions);
         };
@@ -12202,13 +12263,14 @@ zabc.net
 
     function handleLink(url, event) {
         const torrentName = extractTorrentName(url);
+        const freeleechTag = getGaytorFreeleechTag(event.target);
 
         if (CONFIG.showConfirmation) {
             event.preventDefault();
             event.stopPropagation();
 
             const magnet = isMagnetUrl(url);
-            showTorrentConfirmation(url, torrentName, magnet);
+            showTorrentConfirmation(url, torrentName, magnet, freeleechTag);
         } else {
             event.preventDefault();
             event.stopPropagation();
@@ -12216,10 +12278,11 @@ zabc.net
             // Runs synchronously inside the click: may open the sign-in tab
             signInFromGestureIfNeeded().then((ok) => {
                 if (!ok) return;
+                const addOptions = freeleechTag ? { tags: [freeleechTag] } : {};
                 if (isMagnetUrl(url)) {
-                    addTorrentByUrl(url, torrentName);
+                    addTorrentByUrl(url, torrentName, 0, addOptions);
                 } else {
-                    handleTorrentDownload(url, torrentName + '.torrent');
+                    handleTorrentDownload(url, torrentName + '.torrent', addOptions);
                 }
             });
         }
@@ -12244,6 +12307,12 @@ zabc.net
                 target = el;
             }
 
+            const clickSource = target || event.target;
+            lastClickSourceElement = clickSource;
+            setTimeout(() => {
+                if (lastClickSourceElement === clickSource) lastClickSourceElement = null;
+            }, 1000);
+
             if (!target || !target.href) return;
 
             const url = target.href;
@@ -12263,11 +12332,12 @@ zabc.net
                 // Coerce - pages may pass a URL object instead of a string
                 const magnetUrl = String(url);
                 const torrentName = extractTorrentName(magnetUrl);
+                const freeleechTag = getGaytorFreeleechTag(lastClickSourceElement);
                 if (CONFIG.showConfirmation) {
-                    showTorrentConfirmation(magnetUrl, torrentName, true);
+                    showTorrentConfirmation(magnetUrl, torrentName, true, freeleechTag);
                 } else {
                     signInFromGestureIfNeeded().then((ok) => {
-                        if (ok) addTorrentByUrl(magnetUrl, torrentName);
+                        if (ok) addTorrentByUrl(magnetUrl, torrentName, 0, freeleechTag ? { tags: [freeleechTag] } : {});
                     });
                 }
                 return null;
