@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         qBittorrent Torrent Interceptor
 // @namespace    https://github.com/joshkerr/qbit-tampermonkey
-// @version      1.18.0
+// @version      1.19.0
 // @updateURL    https://raw.githubusercontent.com/darrenloasby/qbit-tampermonkey/main/qbittorrent-interceptor.user.js
 // @downloadURL  https://raw.githubusercontent.com/darrenloasby/qbit-tampermonkey/main/qbittorrent-interceptor.user.js
 // @description  Intercept torrent downloads and magnet links, send them to qBittorrent or download locally
@@ -12242,33 +12242,70 @@ zabc.net
                     <div>Source: ${escapeHtml(status.source)}</div>
                     <div>Countdown: ${escapeHtml(status.countdown || '(none)')}</div>
                     <div>Result: ${escapeHtml(status.reason)}</div>
-                    <div>Script: v1.18.0</div>
+                    <div>Script: v1.19.0</div>
                 </details>
             </div>`;
     }
 
-    function showTorrentConfirmation(url, torrentName, magnet, freeleechStatus = null) {
+    function isGaytorTorrentSnatched(sourceElement = null) {
+        const host = String(window.location.hostname || '').toLowerCase();
+        if (host !== 'gaytor.rent' && !host.endsWith('.gaytor.rent')) return false;
+        const row = sourceElement?.closest?.('tr');
+        if (row?.querySelector('td.infocol')) {
+            return row.classList.contains('dc-row-have-snatched') || !!row.querySelector('.dc-have-snatched');
+        }
+        return !!document.querySelector('.dc-details-snatched-pill');
+    }
+
+    function confirmSnatchedTorrent(torrentName, autoStart, onConfirm) {
+        const openInApp = autoStart === 'app';
+        const confirmation = showModal(
+            'Already snatched on Gaytor',
+            `<p>Gaytor records this torrent as already downloaded. ${openInApp ? 'Open it in your torrent app' : 'Add it to qBittorrent'} again?</p>
+             <p>${escapeHtml(torrentName)}</p>
+             ${openInApp ? '' : `<p>It will be added ${autoStart ? 'and started' : 'paused'}.</p>`}`,
+            onConfirm,
+            null,
+            { confirmLabel: openInApp ? 'Yes, open again' : autoStart ? 'Yes, add again and start' : 'Yes, add again paused' }
+        );
+        // Cancelling is the default action on the duplicate warning.
+        confirmation.modal.querySelector('.qbit-cancel').focus();
+    }
+
+    function showTorrentConfirmation(url, torrentName, magnet, freeleechStatus = null, alreadySnatched = false) {
         const freeleechTag = freeleechStatus?.tag || '';
         const categoryInputId = `qbit-category-${Math.random().toString(36).slice(2)}`;
         const datalistId = `${categoryInputId}-options`;
         const defaultCategory = getDefaultTorrentCategory();
         const content = `
             <p>Send this to qBittorrent?</p>
+            ${alreadySnatched ? '<p><strong>Already snatched on Gaytor.</strong> Adding this torrent requires a second confirmation.</p>' : ''}
             <label for="${categoryInputId}">Category</label>
             <input class="qbit-category-input" id="${categoryInputId}" type="text" list="${datalistId}" value="${escapeHtml(defaultCategory)}" aria-label="Torrent category">
             <datalist id="${datalistId}"></datalist>
             <div class="qbit-torrent-name">${escapeHtml(torrentName)}</div>
             ${renderFreeleechStatus(freeleechStatus)}
         `;
-        const submit = async (autoStart, modal) => {
-            if (!await signInFromGestureIfNeeded()) return;
+        const submit = (autoStart, modal) => {
             const category = modal.modal.querySelector('.qbit-category-input').value.trim();
             const addOptions = { category, autoStart, tags: freeleechTag ? [freeleechTag] : [] };
-            if (magnet) await addTorrentByUrl(url, torrentName, 0, addOptions);
-            else await handleTorrentDownload(url, torrentName + '.torrent', addOptions);
+            const performAdd = async () => {
+                if (!await signInFromGestureIfNeeded()) return;
+                if (magnet) await addTorrentByUrl(url, torrentName, 0, addOptions);
+                else await handleTorrentDownload(url, torrentName + '.torrent', addOptions);
+            };
+            if (alreadySnatched) {
+                confirmSnatchedTorrent(torrentName, autoStart, performAdd);
+                return;
+            }
+            return performAdd();
         };
         const extraButtons = magnet
-            ? [{ label: '🧲 Open in App', onClick: () => { window.location.href = url; } }]
+            ? [{ label: '🧲 Open in App', onClick: () => {
+                const openApp = () => { window.location.href = url; };
+                if (alreadySnatched) confirmSnatchedTorrent(torrentName, 'app', openApp);
+                else openApp();
+            } }]
             : [{ label: '⬇️ Download File', onClick: () => handleLocalDownload(url, torrentName + '.torrent') }];
         extraButtons.push({
             label: 'Add paused',
@@ -12298,13 +12335,14 @@ zabc.net
         const freeleechStatus = getGaytorFreeleechStatus(lastClickSourceElement || event.target);
         const freeleechTag = freeleechStatus?.tag || '';
         debugLog('Freeleech detection:', freeleechStatus);
+        const alreadySnatched = isGaytorTorrentSnatched(lastClickSourceElement || event.target);
 
-        if (CONFIG.showConfirmation) {
+        if (CONFIG.showConfirmation || alreadySnatched) {
             event.preventDefault();
             event.stopPropagation();
 
             const magnet = isMagnetUrl(url);
-            showTorrentConfirmation(url, torrentName, magnet, freeleechStatus);
+            showTorrentConfirmation(url, torrentName, magnet, freeleechStatus, alreadySnatched);
         } else {
             event.preventDefault();
             event.stopPropagation();
@@ -12369,8 +12407,9 @@ zabc.net
                 const freeleechStatus = getGaytorFreeleechStatus(lastClickSourceElement);
                 const freeleechTag = freeleechStatus?.tag || '';
                 debugLog('Freeleech detection:', freeleechStatus);
-                if (CONFIG.showConfirmation) {
-                    showTorrentConfirmation(magnetUrl, torrentName, true, freeleechStatus);
+                const alreadySnatched = isGaytorTorrentSnatched(lastClickSourceElement);
+                if (CONFIG.showConfirmation || alreadySnatched) {
+                    showTorrentConfirmation(magnetUrl, torrentName, true, freeleechStatus, alreadySnatched);
                 } else {
                     signInFromGestureIfNeeded().then((ok) => {
                         if (ok) addTorrentByUrl(magnetUrl, torrentName, 0, freeleechTag ? { tags: [freeleechTag] } : {});
@@ -12402,6 +12441,11 @@ zabc.net
         const input = prompt('Enter torrent URL or magnet link:');
         const url = input && input.trim();
         if (url) {
+            const sourceLink = Array.from(document.links).find((link) => link.href === url);
+            if (sourceLink && isGaytorTorrentSnatched(sourceLink)) {
+                showTorrentConfirmation(url, extractTorrentName(url), isMagnetUrl(url), getGaytorFreeleechStatus(sourceLink), true);
+                return;
+            }
             if (isMagnetUrl(url)) {
                 addTorrentByUrl(url, extractTorrentName(url));
             } else {
