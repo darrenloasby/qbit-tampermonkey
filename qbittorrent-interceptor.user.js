@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         qBittorrent Torrent Interceptor
 // @namespace    https://github.com/joshkerr/qbit-tampermonkey
-// @version      1.17.0
+// @version      1.18.0
 // @updateURL    https://raw.githubusercontent.com/darrenloasby/qbit-tampermonkey/main/qbittorrent-interceptor.user.js
 // @downloadURL  https://raw.githubusercontent.com/darrenloasby/qbit-tampermonkey/main/qbittorrent-interceptor.user.js
 // @description  Intercept torrent downloads and magnet links, send them to qBittorrent or download locally
@@ -97,6 +97,18 @@
             font-size: 18px;
             font-weight: 600;
         }
+        .qbit-freeleech-status {
+            margin-top: 12px;
+            padding: 12px;
+            border: 1px solid #bbb;
+            border-radius: 6px;
+            font-size: 13px;
+            line-height: 1.5;
+            overflow-wrap: anywhere;
+        }
+        .qbit-freeleech-status details { margin-top: 6px; }
+        .qbit-freeleech-status summary { cursor: pointer; }
+        .qbit-freeleech-status code { background: transparent; color: inherit; }
         .qbit-modal-content {
             margin-bottom: 20px;
         }
@@ -12191,33 +12203,52 @@ zabc.net
             : null;
     }
 
-    function getGaytorFreeleechTag(sourceElement = null) {
+    function getGaytorFreeleechStatus(sourceElement = null) {
         const host = String(window.location.hostname || '').toLowerCase();
-        if (host !== 'gaytor.rent' && !host.endsWith('.gaytor.rent')) return '';
+        if (host !== 'gaytor.rent' && !host.endsWith('.gaytor.rent')) return null;
 
-        // Search pages put each torrent's countdown in its info cell. Scope
-        // lookup to the row containing the clicked download link so the tag
-        // cannot accidentally use another result's countdown.
+        // tocol1/tocol2 are alternating row colors, not torrent identifiers.
+        // Always keep search detection within the clicked torrent's own row.
         const row = sourceElement?.closest?.('tr');
-        const infoCell = row?.querySelector('td.tocol2.biggerfont.infocol');
-        let expiry = null;
-        if (infoCell && /freeleech/i.test(infoCell.textContent || '')) {
-            const countdown = Array.from(infoCell.querySelectorAll('font'))
-                .map((font) => font.textContent || '')
-                .find((text) => /\b\d+\s*h\s*:\s*\d+\s*m\b|\b\d+\s*(?:days?|hours?|minutes?|seconds?)\b/i.test(text));
-            expiry = parseFreeleechExpiryTimestamp(countdown);
-        }
-
-        // Detail pages display the remaining time in a dedicated badge.
-        if (!expiry) {
-            const detailText = document.querySelector('span.dc-details-fl-badge small')?.textContent;
-            expiry = parseFreeleechExpiryTimestamp(detailText);
-        }
-
-        return expiry ? `freeleech-until-${expiry}` : '';
+        const infoCell = row?.querySelector('td.infocol');
+        const detailBadge = infoCell ? null : document.querySelector('span.dc-details-fl-badge');
+        const container = infoCell || detailBadge;
+        const source = infoCell ? `Search row (${infoCell.className})`
+            : detailBadge ? 'Detail page badge' : row ? 'Clicked row: no info cell' : 'No torrent row or detail badge';
+        const active = !!container && /freeleech/i.test(container.textContent || '');
+        const candidates = infoCell
+            ? Array.from(infoCell.querySelectorAll('font, small')).map((el) => el.textContent || '')
+            : [detailBadge?.textContent || ''];
+        const countdown = candidates.find((text) => /\bleft\b/i.test(text)) || '';
+        const expiry = active ? parseFreeleechExpiryTimestamp(countdown) : null;
+        const tag = expiry ? `freeleech-until-${expiry}` : '';
+        const reason = !container ? 'Torrent information not found'
+            : !active ? 'No freeleech marker found'
+            : !countdown ? 'Freeleech marker found, but no countdown'
+            : !expiry ? 'Countdown is zero or could not be parsed' : 'Expiry tag ready';
+        return { active, expiry, tag, source, countdown: countdown.trim(), reason };
     }
 
-    function showTorrentConfirmation(url, torrentName, magnet, freeleechTag = '') {
+    function renderFreeleechStatus(status) {
+        if (!status) return '';
+        const message = status.tag
+            ? `Freeleech until ${new Date(status.expiry * 1000).toLocaleString()}`
+            : status.active ? 'Freeleech detected — no expiry tag available' : 'Freeleech not detected';
+        return `
+            <div class="qbit-freeleech-status" role="status">
+                <strong>${escapeHtml(message)}</strong>
+                <div>${status.tag ? `Tag: <code>${escapeHtml(status.tag)}</code>` : escapeHtml(status.reason)}</div>
+                <details><summary>Freeleech detection details</summary>
+                    <div>Source: ${escapeHtml(status.source)}</div>
+                    <div>Countdown: ${escapeHtml(status.countdown || '(none)')}</div>
+                    <div>Result: ${escapeHtml(status.reason)}</div>
+                    <div>Script: v1.18.0</div>
+                </details>
+            </div>`;
+    }
+
+    function showTorrentConfirmation(url, torrentName, magnet, freeleechStatus = null) {
+        const freeleechTag = freeleechStatus?.tag || '';
         const categoryInputId = `qbit-category-${Math.random().toString(36).slice(2)}`;
         const datalistId = `${categoryInputId}-options`;
         const defaultCategory = getDefaultTorrentCategory();
@@ -12227,6 +12258,7 @@ zabc.net
             <input class="qbit-category-input" id="${categoryInputId}" type="text" list="${datalistId}" value="${escapeHtml(defaultCategory)}" aria-label="Torrent category">
             <datalist id="${datalistId}"></datalist>
             <div class="qbit-torrent-name">${escapeHtml(torrentName)}</div>
+            ${renderFreeleechStatus(freeleechStatus)}
         `;
         const submit = async (autoStart, modal) => {
             if (!await signInFromGestureIfNeeded()) return;
@@ -12263,14 +12295,16 @@ zabc.net
 
     function handleLink(url, event) {
         const torrentName = extractTorrentName(url);
-        const freeleechTag = getGaytorFreeleechTag(event.target);
+        const freeleechStatus = getGaytorFreeleechStatus(lastClickSourceElement || event.target);
+        const freeleechTag = freeleechStatus?.tag || '';
+        debugLog('Freeleech detection:', freeleechStatus);
 
         if (CONFIG.showConfirmation) {
             event.preventDefault();
             event.stopPropagation();
 
             const magnet = isMagnetUrl(url);
-            showTorrentConfirmation(url, torrentName, magnet, freeleechTag);
+            showTorrentConfirmation(url, torrentName, magnet, freeleechStatus);
         } else {
             event.preventDefault();
             event.stopPropagation();
@@ -12332,9 +12366,11 @@ zabc.net
                 // Coerce - pages may pass a URL object instead of a string
                 const magnetUrl = String(url);
                 const torrentName = extractTorrentName(magnetUrl);
-                const freeleechTag = getGaytorFreeleechTag(lastClickSourceElement);
+                const freeleechStatus = getGaytorFreeleechStatus(lastClickSourceElement);
+                const freeleechTag = freeleechStatus?.tag || '';
+                debugLog('Freeleech detection:', freeleechStatus);
                 if (CONFIG.showConfirmation) {
-                    showTorrentConfirmation(magnetUrl, torrentName, true, freeleechTag);
+                    showTorrentConfirmation(magnetUrl, torrentName, true, freeleechStatus);
                 } else {
                     signInFromGestureIfNeeded().then((ok) => {
                         if (ok) addTorrentByUrl(magnetUrl, torrentName, 0, freeleechTag ? { tags: [freeleechTag] } : {});
