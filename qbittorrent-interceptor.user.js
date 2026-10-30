@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         qBittorrent Torrent Interceptor
 // @namespace    https://github.com/joshkerr/qbit-tampermonkey
-// @version      1.20.0
+// @version      1.20.1
 // @updateURL    https://raw.githubusercontent.com/darrenloasby/qbit-tampermonkey/main/qbittorrent-interceptor.user.js
 // @downloadURL  https://raw.githubusercontent.com/darrenloasby/qbit-tampermonkey/main/qbittorrent-interceptor.user.js
 // @description  Intercept torrent downloads and magnet links, send them to qBittorrent or download locally
@@ -11636,7 +11636,14 @@ zabc.net
                 true // isLogin flag
             );
 
-            if (response.status === 200 && response.responseText === 'Ok.') {
+            if (response.status === 204) {
+                // qBittorrent returns 204 when authentication is bypassed for
+                // a whitelisted local subnet. No SID is needed for later calls.
+                qbitSessionId = 'no-sid-cookie';
+                setStoredQbitSession(qbitSessionId);
+                debugLog('qBittorrent: Local-subnet authentication bypass accepted');
+                return true;
+            } else if (response.status === 200 && response.responseText === 'Ok.') {
                 // When using fetch, cookies are handled by the browser automatically
                 // When using GM_xmlhttpRequest, extract SID from response headers
                 if (!shouldUseFetch()) {
