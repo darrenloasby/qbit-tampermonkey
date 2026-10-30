@@ -2,6 +2,13 @@
 
 A Tampermonkey userscript that intercepts torrent file downloads and magnet links, automatically sending them to your qBittorrent server. This one works with Chrome, Firefox and Safari. The Safari support means that iOS and iPad OS users now have an option for loading torrents directly into their qbittorrent servers from websites. 
 
+Named qBittorrent destination profiles are supported. Existing single-server
+settings migrate into a `Krypton` profile, which remains the default. The add
+confirmation can route one torrent to another profile, with profile-specific
+WebUI URL, login, save path, and category. Credentials stay in Tampermonkey's
+local storage and sessions are kept separate per destination. For Gaytor,
+configure the profile category as `gaytor-notifier` for the host cleanup worker.
+
 ## Features
 
 - **Magnet Link Interception** - Clicks on magnet links are captured and sent to qBittorrent
@@ -46,12 +53,15 @@ After installation, configure your qBittorrent connection:
 
 1. Click the Tampermonkey icon in Safari's toolbar
 2. Click "Configure qBittorrent" under the script menu
-3. Enter your settings:
-   - **qBittorrent URL**: Your server address (e.g., `http://localhost:8080` or `http://192.168.1.100:8080`)
-   - **Username**: Your qBittorrent Web UI username
-   - **Password**: Your qBittorrent Web UI password
-   - **Save Path** (optional): Default download location
-   - **Category** (optional): Auto-assign category to added torrents
+3. Add one or more destination profiles. Each profile has a unique ID, name,
+   Web UI URL, username, password, save path, and category. The old single
+   server settings migrate into a `Krypton` profile automatically. Keep
+   `Krypton` as the default if it should receive downloads unless you pick
+   another destination in the add confirmation.
+4. For Gaytor torrents managed by the cleanup worker, set that profile's
+   category to `gaytor-notifier`. Other profiles can use another category.
+   Credentials are saved in Tampermonkey's local storage and each server has
+   its own login session.
 
 ### Remote qBittorrent Server
 

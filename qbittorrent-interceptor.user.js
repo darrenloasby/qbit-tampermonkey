@@ -28,17 +28,47 @@
     // ============================================
     // Getters read live from GM storage so settings changed in another tab
     // (or in this tab's settings modal) apply without a page reload.
+    const legacyDestination = () => ({
+        id: 'krypton', name: 'Krypton',
+        url: GM_getValue('qbit_url', 'http://localhost:8080'),
+        username: GM_getValue('qbit_username', 'admin'),
+        password: GM_getValue('qbit_password', 'adminadmin'),
+        savePath: GM_getValue('qbit_savepath', ''),
+        category: GM_getValue('qbit_category', ''),
+    });
+    function getDestinationProfiles() {
+        const stored = GM_getValue('qbit_destinations', null);
+        if (Array.isArray(stored) && stored.length && stored.every((profile) =>
+            profile && typeof profile.id === 'string' && typeof profile.name === 'string' &&
+            typeof profile.url === 'string' && typeof profile.username === 'string' &&
+            typeof profile.password === 'string')) return stored;
+        const migrated = [legacyDestination()];
+        GM_setValue('qbit_destinations', migrated);
+        GM_setValue('qbit_default_destination', 'krypton');
+        const legacySession = GM_getValue('qbit_session', null);
+        if (legacySession) GM_setValue('qbit_session_krypton', legacySession);
+        return migrated;
+    }
+    function getDefaultDestination() {
+        const profiles = getDestinationProfiles();
+        const selected = GM_getValue('qbit_default_destination', 'krypton');
+        return profiles.find((profile) => profile.id === selected) || profiles[0];
+    }
+    let activeDestinationId = getDefaultDestination().id;
+    function getActiveDestination() {
+        return getDestinationProfiles().find((profile) => profile.id === activeDestinationId) || getDefaultDestination();
+    }
     const CONFIG = {
         // qBittorrent Web UI settings
         qbittorrent: {
-            get url() { return GM_getValue('qbit_url', 'http://localhost:8080'); },
-            get username() { return GM_getValue('qbit_username', 'admin'); },
-            get password() { return GM_getValue('qbit_password', 'adminadmin'); },
+            get url() { return getActiveDestination().url; },
+            get username() { return getActiveDestination().username; },
+            get password() { return getActiveDestination().password; },
         },
         // Default save path (leave empty for qBittorrent default)
-        get savePath() { return GM_getValue('qbit_savepath', ''); },
+        get savePath() { return getActiveDestination().savePath || ''; },
         // Category for added torrents (leave empty for none)
-        get category() { return GM_getValue('qbit_category', ''); },
+        get category() { return getActiveDestination().category || ''; },
         // Automatically start torrent after adding
         get autoStart() { return GM_getValue('qbit_autostart', true); },
         // Use Automatic Torrent Management (lets qBittorrent manage save paths by category)
@@ -60,6 +90,32 @@
 
     // Session ID for qBittorrent authentication
     let qbitSessionId = null;
+    let destinationQueue = Promise.resolve();
+    function setStoredQbitSession(value) {
+        GM_setValue(`qbit_session_${activeDestinationId}`, value);
+    }
+    function getStoredQbitSession() {
+        return GM_getValue(`qbit_session_${activeDestinationId}`, null);
+    }
+    function withDestination(destinationId, action) {
+        const run = async () => {
+            const profiles = getDestinationProfiles();
+            const destination = profiles.find((profile) => profile.id === destinationId);
+            if (!destination) throw new Error('Selected qBittorrent destination no longer exists');
+            activeDestinationId = destination.id;
+            qbitSessionId = getStoredQbitSession();
+            try {
+                return await action();
+            } finally {
+                setStoredQbitSession(qbitSessionId);
+                activeDestinationId = getDefaultDestination().id;
+                qbitSessionId = getStoredQbitSession();
+            }
+        };
+        const result = destinationQueue.then(run, run);
+        destinationQueue = result.catch(() => {});
+        return result;
+    }
     let lastClickSourceElement = null;
 
     // ============================================
@@ -10674,6 +10730,12 @@ zabc.net
         return `${getRegistrableDomainLabel(window.location.hostname)}-notifier`;
     }
 
+    function getDestinationCategory(destination) {
+        if (destination.category) return destination.category;
+        const host = String(window.location.hostname || '').toLowerCase();
+        return host === 'gaytor.rent' || host.endsWith('.gaytor.rent') ? 'gaytor-notifier' : '';
+    }
+
     async function getTorrentCategories() {
         try {
             if (!await ensureAuthenticated()) return [];
@@ -10818,26 +10880,15 @@ zabc.net
         modal.innerHTML = `
             <h2>⚙️ qBittorrent Settings</h2>
             <div class="qbit-modal-content">
-                <label>
-                    qBittorrent URL:
-                    <input type="text" id="qbit-cfg-url" value="${escapeHtml(CONFIG.qbittorrent.url)}" placeholder="http://localhost:8080">
+                <label>Default destination:
+                    <select id="qbit-cfg-default">${getDestinationProfiles().map((profile) =>
+                        `<option value="${escapeHtml(profile.id)}" ${profile.id === getDefaultDestination().id ? 'selected' : ''}>${escapeHtml(profile.name)}</option>`
+                    ).join('')}</select>
                 </label>
-                <label>
-                    Username:
-                    <input type="text" id="qbit-cfg-username" value="${escapeHtml(CONFIG.qbittorrent.username)}">
+                <label>Destinations (edit as JSON; credentials stay in Tampermonkey storage):
+                    <textarea id="qbit-cfg-destinations" rows="10" spellcheck="false">${escapeHtml(JSON.stringify(getDestinationProfiles(), null, 2))}</textarea>
                 </label>
-                <label>
-                    Password:
-                    <input type="password" id="qbit-cfg-password" value="${escapeHtml(CONFIG.qbittorrent.password)}">
-                </label>
-                <label>
-                    Default Save Path (optional):
-                    <input type="text" id="qbit-cfg-savepath" value="${escapeHtml(CONFIG.savePath)}" placeholder="/downloads/torrents">
-                </label>
-                <label>
-                    Category (optional):
-                    <input type="text" id="qbit-cfg-category" value="${escapeHtml(CONFIG.category)}">
-                </label>
+                <div class="qbit-toggle-hint">Each entry uses id, name, url, username, password, savePath, and category. Krypton is kept as the initial default.</div>
                 <hr class="qbit-actions-divider">
                 <div class="qbit-actions-header">Quick Actions</div>
                 <div class="qbit-actions-grid">
@@ -10867,8 +10918,10 @@ zabc.net
 
         // Quick action: Force Re-login
         modal.querySelector('#qbit-act-relogin').onclick = async () => {
-            qbitSessionId = null;
-            GM_setValue('qbit_session', null);
+            await withDestination(getDefaultDestination().id, async () => {
+                qbitSessionId = null;
+                setStoredQbitSession(null);
+            });
             // Give the silent cookie path another chance (permissions may have changed)
             setCookieApiBroken(false);
             closeConfig();
@@ -10883,14 +10936,17 @@ zabc.net
 
         // Quick action: Open Web UI (keep modal open so user can continue configuring)
         modal.querySelector('#qbit-act-webui').onclick = () => {
-            window.open(CONFIG.qbittorrent.url, '_blank', 'noopener,noreferrer');
+            const id = modal.querySelector('#qbit-cfg-default').value;
+            const destination = getDestinationProfiles().find((profile) => profile.id === id);
+            if (destination) window.open(destination.url, '_blank', 'noopener,noreferrer');
         };
 
         // Quick action: Sign in via Web UI tab (Safari/iOS/iPadOS cookie session).
         // Called straight from the click so window.open keeps the user gesture.
         modal.querySelector('#qbit-act-session').onclick = () => {
+            const id = modal.querySelector('#qbit-cfg-default').value;
             closeConfig();
-            autoLoginViaTab();
+            withDestination(id, () => autoLoginViaTab());
         };
 
         // Quick action: Toggle Fetch Mode
@@ -10913,24 +10969,33 @@ zabc.net
         };
 
         modal.querySelector('#qbit-cfg-save').onclick = () => {
-            const url = modal.querySelector('#qbit-cfg-url').value.trim().replace(/\/$/, '');
-            const username = modal.querySelector('#qbit-cfg-username').value;
-            const password = modal.querySelector('#qbit-cfg-password').value;
-            const savePath = modal.querySelector('#qbit-cfg-savepath').value;
-            const category = modal.querySelector('#qbit-cfg-category').value;
-
-            GM_setValue('qbit_url', url);
-            GM_setValue('qbit_username', username);
-            GM_setValue('qbit_password', password);
-            GM_setValue('qbit_savepath', savePath);
-            GM_setValue('qbit_category', category);
-
-            // CONFIG reads live from GM storage, so no local copies to update.
-            // Reset session to force re-auth
-            qbitSessionId = null;
-
-            closeConfig();
-            showToast('Settings saved!', 'success');
+            try {
+                const profiles = JSON.parse(modal.querySelector('#qbit-cfg-destinations').value);
+                const ids = new Set();
+                if (!Array.isArray(profiles) || !profiles.length || !profiles.every((profile) => {
+                    const valid = profile && typeof profile.id === 'string' && /^[a-zA-Z0-9_-]+$/.test(profile.id) &&
+                        !ids.has(profile.id) && (ids.add(profile.id), true) &&
+                        typeof profile.name === 'string' && profile.name.trim() &&
+                        typeof profile.url === 'string' && /^https?:\/\//i.test(profile.url) &&
+                        typeof profile.username === 'string' && typeof profile.password === 'string' &&
+                        (profile.savePath === undefined || typeof profile.savePath === 'string') &&
+                        (profile.category === undefined || typeof profile.category === 'string');
+                    return !!valid;
+                })) throw new Error('Provide one or more valid destination profiles.');
+                const selectedDefault = modal.querySelector('#qbit-cfg-default').value;
+                const defaultId = profiles.some((profile) => profile.id === selectedDefault) ? selectedDefault : profiles[0].id;
+                GM_setValue('qbit_destinations', profiles.map((profile) => ({
+                    ...profile, url: profile.url.trim().replace(/\/+$/, ''), name: profile.name.trim(),
+                    savePath: profile.savePath || '', category: profile.category || '',
+                })));
+                GM_setValue('qbit_default_destination', defaultId);
+                activeDestinationId = defaultId;
+                qbitSessionId = getStoredQbitSession();
+                closeConfig();
+                showToast('Destination profiles saved.', 'success');
+            } catch (error) {
+                showToast(error.message || 'Invalid destination profile JSON.', 'error');
+            }
         };
 
         const closeConfig = () => {
@@ -11310,7 +11375,7 @@ zabc.net
 
         // Rely on Safari's cookie jar from here on (a stale manual SID would only get in the way)
         qbitSessionId = 'safari-auto';
-        GM_setValue('qbit_session', null);
+        setStoredQbitSession(null);
 
         return waitForTabLogin(handle, nonce);
     }
@@ -11581,7 +11646,7 @@ zabc.net
                     const sidMatch = cookies.match(/SID=([^;]+)/i);
                     if (sidMatch) {
                         qbitSessionId = sidMatch[1];
-                        GM_setValue('qbit_session', qbitSessionId);
+                        setStoredQbitSession(qbitSessionId);
                         debugLog('qBittorrent: Login successful, SID:', qbitSessionId.substring(0, 8) + '...');
                     } else {
                         console.warn('qBittorrent: Login succeeded but no SID cookie found in response');
@@ -11641,7 +11706,7 @@ zabc.net
 
         // Try to restore session from storage
         if (!qbitSessionId) {
-            qbitSessionId = GM_getValue('qbit_session', null);
+            qbitSessionId = getStoredQbitSession();
         }
 
         if (isSafari) {
@@ -11657,7 +11722,7 @@ zabc.net
                 }
                 // Session expired, clear it
                 qbitSessionId = null;
-                GM_setValue('qbit_session', null);
+                setStoredQbitSession(null);
             } catch (e) {
                 // Not authenticated, proceed to login
                 qbitSessionId = null;
@@ -11670,7 +11735,7 @@ zabc.net
             const response = await qbitRequest('/api/v2/app/version', 'GET', null);
             if (response.status === 200) {
                 qbitSessionId = 'no-sid-cookie';
-                GM_setValue('qbit_session', qbitSessionId);
+                setStoredQbitSession(qbitSessionId);
                 debugLog('qBittorrent: API is accessible without authentication');
                 return true;
             }
@@ -11692,7 +11757,7 @@ zabc.net
             return true;
         }
         qbitSessionId = null;
-        GM_setValue('qbit_session', null);
+        setStoredQbitSession(null);
 
         const loggedIn = await qbitLogin();
         if (loggedIn && await probeSession()) {
@@ -11781,7 +11846,7 @@ zabc.net
                 // Session might have expired or CSRF issue - force re-login and retry
                 debugLog('qBittorrent: Got 403, forcing re-login...');
                 qbitSessionId = null;
-                GM_setValue('qbit_session', null);
+                setStoredQbitSession(null);
                 return await addTorrentByUrl(url, torrentName, retryCount + 1, addOptions);
             } else {
                 showToast(`qBittorrent: Failed to add torrent (${response.status})`, 'error');
@@ -11887,7 +11952,7 @@ zabc.net
                 // Session might have expired or CSRF issue - force re-login and retry
                 debugLog('qBittorrent: Got 403, forcing re-login...');
                 qbitSessionId = null;
-                GM_setValue('qbit_session', null);
+                setStoredQbitSession(null);
                 return await addTorrentByFile(fileBlob, fileName, retryCount + 1, addOptions);
             } else {
                 showToast(`qBittorrent: Failed to add torrent (${response.status})`, 'error');
@@ -12276,10 +12341,16 @@ zabc.net
         const freeleechTag = freeleechStatus?.tag || '';
         const categoryInputId = `qbit-category-${Math.random().toString(36).slice(2)}`;
         const datalistId = `${categoryInputId}-options`;
-        const defaultCategory = getDefaultTorrentCategory();
+        const destinationInputId = `qbit-destination-${Math.random().toString(36).slice(2)}`;
+        const defaultDestination = getDefaultDestination();
+        const defaultCategory = defaultDestination.category || getDefaultTorrentCategory();
         const content = `
             <p>Send this to qBittorrent?</p>
             ${alreadySnatched ? '<p><strong>Already snatched on Gaytor.</strong> Adding this torrent requires a second confirmation.</p>' : ''}
+            <label for="${destinationInputId}">Destination</label>
+            <select id="${destinationInputId}" aria-label="qBittorrent destination">
+                ${getDestinationProfiles().map((profile) => `<option value="${escapeHtml(profile.id)}" ${profile.id === defaultDestination.id ? 'selected' : ''}>${escapeHtml(profile.name)}</option>`).join('')}
+            </select>
             <label for="${categoryInputId}">Category</label>
             <input class="qbit-category-input" id="${categoryInputId}" type="text" list="${datalistId}" value="${escapeHtml(defaultCategory)}" aria-label="Torrent category">
             <datalist id="${datalistId}"></datalist>
@@ -12288,11 +12359,14 @@ zabc.net
         `;
         const submit = (autoStart, modal) => {
             const category = modal.modal.querySelector('.qbit-category-input').value.trim();
+            const destinationId = modal.modal.querySelector(`#${destinationInputId}`).value;
             const addOptions = { category, autoStart, tags: freeleechTag ? [freeleechTag] : [] };
             const performAdd = async () => {
-                if (!await signInFromGestureIfNeeded()) return;
-                if (magnet) await addTorrentByUrl(url, torrentName, 0, addOptions);
-                else await handleTorrentDownload(url, torrentName + '.torrent', addOptions);
+                return withDestination(destinationId, async () => {
+                    if (!await signInFromGestureIfNeeded()) return;
+                    if (magnet) await addTorrentByUrl(url, torrentName, 0, addOptions);
+                    else await handleTorrentDownload(url, torrentName + '.torrent', addOptions);
+                });
             };
             if (alreadySnatched) {
                 confirmSnatchedTorrent(torrentName, autoStart, performAdd);
@@ -12319,15 +12393,26 @@ zabc.net
             extraButtons
         });
 
-        const datalist = modalRef.modal.querySelector(`#${datalistId}`);
-        getTorrentCategories().then((categories) => {
-            if (!modalRef.modal.isConnected) return;
-            for (const category of categories) {
-                const option = document.createElement('option');
-                option.value = category;
-                datalist.appendChild(option);
-            }
+        const destinationSelect = modalRef.modal.querySelector(`#${destinationInputId}`);
+        const populateCategories = () => {
+            const selectedId = destinationSelect.value;
+            const datalist = modalRef.modal.querySelector(`#${datalistId}`);
+            datalist.replaceChildren();
+            withDestination(selectedId, () => getTorrentCategories()).then((categories) => {
+                if (!modalRef.modal.isConnected || destinationSelect.value !== selectedId) return;
+                for (const category of categories) {
+                    const option = document.createElement('option');
+                    option.value = category;
+                    datalist.appendChild(option);
+                }
+            }).catch((error) => debugLog('Could not load destination categories:', error));
+        };
+        destinationSelect.addEventListener('change', () => {
+            const selected = getDestinationProfiles().find((profile) => profile.id === destinationSelect.value);
+            if (selected) modalRef.modal.querySelector('.qbit-category-input').value = selected.category || getDefaultTorrentCategory();
+            populateCategories();
         });
+        populateCategories();
     }
 
     function handleLink(url, event) {
@@ -12351,11 +12436,12 @@ zabc.net
             signInFromGestureIfNeeded().then((ok) => {
                 if (!ok) return;
                 const addOptions = freeleechTag ? { tags: [freeleechTag] } : {};
-                if (isMagnetUrl(url)) {
-                    addTorrentByUrl(url, torrentName, 0, addOptions);
-                } else {
-                    handleTorrentDownload(url, torrentName + '.torrent', addOptions);
-                }
+                const destination = getDefaultDestination();
+                addOptions.category = getDestinationCategory(destination);
+                withDestination(destination.id, async () => {
+                    if (isMagnetUrl(url)) await addTorrentByUrl(url, torrentName, 0, addOptions);
+                    else await handleTorrentDownload(url, torrentName + '.torrent', addOptions);
+                });
             });
         }
     }
@@ -12412,7 +12498,11 @@ zabc.net
                     showTorrentConfirmation(magnetUrl, torrentName, true, freeleechStatus, alreadySnatched);
                 } else {
                     signInFromGestureIfNeeded().then((ok) => {
-                        if (ok) addTorrentByUrl(magnetUrl, torrentName, 0, freeleechTag ? { tags: [freeleechTag] } : {});
+                        if (ok) {
+                            const destination = getDefaultDestination();
+                            const addOptions = { category: getDestinationCategory(destination), ...(freeleechTag ? { tags: [freeleechTag] } : {}) };
+                            withDestination(destination.id, () => addTorrentByUrl(magnetUrl, torrentName, 0, addOptions));
+                        }
                     });
                 }
                 return null;
@@ -12427,7 +12517,9 @@ zabc.net
         if (isTorrentUrl(window.location.href)) {
             // Intercept the download
             const fileName = extractTorrentName(window.location.href) + '.torrent';
-            handleTorrentDownload(window.location.href, fileName);
+            const destination = getDefaultDestination();
+            const addOptions = { category: getDestinationCategory(destination) };
+            withDestination(destination.id, () => handleTorrentDownload(window.location.href, fileName, addOptions));
         }
     }
 
@@ -12446,10 +12538,12 @@ zabc.net
                 showTorrentConfirmation(url, extractTorrentName(url), isMagnetUrl(url), getGaytorFreeleechStatus(sourceLink), true);
                 return;
             }
+            const destination = getDefaultDestination();
+            const addOptions = { category: getDestinationCategory(destination) };
             if (isMagnetUrl(url)) {
-                addTorrentByUrl(url, extractTorrentName(url));
+                withDestination(destination.id, () => addTorrentByUrl(url, extractTorrentName(url), 0, addOptions));
             } else {
-                handleTorrentDownload(url, extractTorrentName(url) + '.torrent');
+                withDestination(destination.id, () => handleTorrentDownload(url, extractTorrentName(url) + '.torrent', addOptions));
             }
         }
     });
