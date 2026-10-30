@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         qBittorrent Torrent Interceptor
 // @namespace    https://github.com/joshkerr/qbit-tampermonkey
-// @version      1.19.0
+// @version      1.20.0
 // @updateURL    https://raw.githubusercontent.com/darrenloasby/qbit-tampermonkey/main/qbittorrent-interceptor.user.js
 // @downloadURL  https://raw.githubusercontent.com/darrenloasby/qbit-tampermonkey/main/qbittorrent-interceptor.user.js
 // @description  Intercept torrent downloads and magnet links, send them to qBittorrent or download locally
